@@ -1,11 +1,13 @@
 use serde::Deserialize;
 use std::fs;
+use std::fmt;
+
 
 #[derive(Debug, Deserialize)]
 struct Config {
     endpoint: String,
     auth_file: String,
-    starting_dir: String,
+    staging_dir: String,
     rollback_keep: usize,
     update_interval: String,
     self_update: bool,
@@ -40,6 +42,22 @@ impl Config {
     }
 }
 
+
+
+impl fmt::Display for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "endpoint       = {}", self.endpoint)?;
+        writeln!(f, "auth_file      = {}", self.auth_file)?;
+        writeln!(f, "staging_dir    = {}", self.staging_dir)?;
+        writeln!(f, "rollback_keep  = {}", self.rollback_keep)?;
+        writeln!(f, "update_interval= {}", self.update_interval)?;
+        writeln!(f, "self_update    = {}", self.self_update)?;
+        writeln!(f, "log_file       = {}", self.log_file)?;
+        Ok(())
+    }
+}
+
+
 fn main() {
     // Trying primary path
     match Config::load("/srv/firmware/conf.toml") {
@@ -48,7 +66,7 @@ fn main() {
                 eprintln!("Primary config error: {}", e);
                 // Decide if you want to exit or try the fallback
             } else {
-                println!("Loaded and verified primary config: {:?}", cfg);
+                println!("Loaded and verified primary config:\n{}", cfg);
             }
         }
         Err(e) => {
@@ -61,7 +79,7 @@ fn main() {
                         eprintln!("Fallback config error: {}", e);
                         std::process::exit(1);
                     } else {
-                        println!("Loaded and verified fallback config: {:?}", cfg);
+                        println!("Loaded and verified fallback config:\n{}", cfg);
                     }
                 }
                 Err(e) => {
