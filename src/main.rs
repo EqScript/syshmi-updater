@@ -40,6 +40,17 @@ impl Config {
         let config: Config = toml::from_str(&content)?;
         Ok(config)
     }
+
+    fn try_load(path: &str) -> Result<Config, String> {
+        match Config::load(path) {
+            Ok(cfg) => {
+                cfg.check().map_err(|e| format!("Config error in {}: {}", path, e))?;
+                Ok(cfg)
+            }
+            Err(e) => Err(format!("Failed to load {}: {}", path, e)),
+        }
+    }
+    
 }
 
 
@@ -60,33 +71,12 @@ impl fmt::Display for Config {
 
 fn main() {
     // Trying primary path
-    match Config::load("/srv/firmware/conf.toml") {
-        Ok(cfg) => {
-            if let Err(e) = cfg.check() {
-                eprintln!("Primary config error: {}", e);
-                // Decide if you want to exit or try the fallback
-            } else {
-                println!("Loaded and verified primary config:\n{}", cfg);
-            }
-        }
-        Err(e) => {
-            eprintln!("Failed to load primary config: {}", e);
+    let cfg = Config::try_load("/srv/firmware/conf.toml")
+        .or_else(|_| Config::try_load("/etc/syshmi/conf.toml"))
+        .unwrap_or_else(|e| {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        });
 
-            // Fallback to secondary path
-            match Config::load("/etc/syshmi/conf.toml") {
-                Ok(cfg) => {
-                    if let Err(e) = cfg.check() {
-                        eprintln!("Fallback config error: {}", e);
-                        std::process::exit(1);
-                    } else {
-                        println!("Loaded and verified fallback config:\n{}", cfg);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Failed to load fallback config too: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-    }
+    println!("Loaded and verified config:\n{}", cfg)
 }
