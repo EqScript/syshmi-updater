@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::fs;
 use std::fmt;
+use tokio::fs as tokio_fs;
+use tokio::io::AsyncWriteExt;
 
 
 #[derive(Debug, Deserialize)]
@@ -12,6 +14,16 @@ struct Config {
     update_interval: String,
     self_update: bool,
     log_file: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Manifest {
+    version: String,
+    binary: String,
+    checksum: String,
+    download_url: String,
+    start_command: String,
+    rollback_keep: usize,
 }
 
 impl Config {
@@ -68,8 +80,43 @@ impl fmt::Display for Config {
     }
 }
 
+async fn fetch_manifest(endpoint: &str) -> Result<Manifest, Box<dyn std::error::Error>> {
+    let url = endpoint
+        .replace("github.com", "raw.githubusercontent.com")
+        .replace("/blob/", "/");
 
-fn main() {
+    let response = reqwest::get(&url).await?.error_for_status()?;
+    let content = response.text().await?;
+    let manifest: Manifest = toml::from_str(&content)?;
+    Ok(manifest)
+}
+
+async fn download_firmware(
+    manifest: &Manifest,
+    staging_dir: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    println!("Downloading firmware from {}", manifest.download_url);
+
+    let response = reqwest::get(&manifest.download_url).await?.error_for_status()?;
+    
+    // Extract filename from URL
+    let artifact_name = manifest.download_url.split('/').last()
+        .ok_or("Could not extract filename from download URL")?;
+
+    tokio_fs::create_dir_all(staging_dir).await?;
+    
+    let dest_path_str = format!("{}/{}", staging_dir, artifact_name);
+    let mut file = tokio_fs::File::create(&dest_path_str).await?;
+    
+    let content = response.bytes().await?;
+    file.write_all(&content).await?;
+
+    Ok(dest_path_str)
+}
+
+
+#[tokio::main]
+async fn main() {
     // Trying primary path
     let cfg = Config::try_load("/srv/firmware/conf.toml")
         .or_else(|_| Config::try_load("/etc/syshmi/conf.toml"))
@@ -78,5 +125,20 @@ fn main() {
             std::process::exit(1);
         });
 
-    println!("Loaded and verified config:\n{}", cfg)
+    println!("Loaded and verified config:\n{}", cfg);
+
+    let manifest = fetch_manifest(&cfg.endpoint).await.unwrap_or_else(|e| {
+        eprintln!("Failed to fetch or parse manifest: {}", e);
+        std::process::exit(1);
+    });
+
+    println!("Successfully fetched manifest:\n{:#?}", manifest);
+
+    match download_firmware(&manifest, &cfg.staging_dir).await {
+        Ok(path) => println!("Firmware downloaded successfully to {}", path),
+        Err(e) => {
+            eprintln!("Failed to download firmware: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
