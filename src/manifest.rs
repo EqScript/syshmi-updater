@@ -11,6 +11,7 @@ pub struct Manifest {
 pub struct Module {
     pub name: String,
     pub version: String,
+    pub binary: String,
     pub checksum: String,
     pub target_dir: String,
     pub start_command: Option<String>,

@@ -1,6 +1,6 @@
 use std::fs::{self, File};
-use std::os::unix::fs::symlink;
 use std::io::{Read, Write};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -102,10 +102,7 @@ pub fn install(
 
         at_least_one_module_installed = true;
 
-        let module_binary_name = Path::new(module.start_command.as_deref().unwrap_or_default())
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or(format!("Module {} has invalid start_command", module.name))?;
+        let module_binary_name = &module.binary;
 
         let found_file_path = find_file_in_dir(&unpack_dir, module_binary_name).ok_or(format!(
             "Could not find module binary '{}' in unpacked archive.",
@@ -114,7 +111,9 @@ pub fn install(
 
         verify_checksum(&found_file_path, &module.checksum)?;
 
-        let release_dir = module_dir.join("releases").join(format!("v{}", &module.version));
+        let release_dir = module_dir
+            .join("releases")
+            .join(format!("v{}", &module.version));
 
         if release_dir.exists() {
             fs::remove_dir_all(&release_dir)?;
@@ -122,23 +121,27 @@ pub fn install(
         fs::create_dir_all(&release_dir)?;
 
         let target_file_path = release_dir.join(module_binary_name);
-        
+
         println!(
             "  - Installing {:?} to {:?}",
             found_file_path, target_file_path
         );
         fs::rename(found_file_path, &target_file_path)?;
 
-        let active_binary_path = module_dir.join(module_binary_name);
+        // Using start_command from the manifest for the target binary name
+        let active_binary_path = Path::new(module.start_command.as_deref().unwrap());
         if active_binary_path.exists() {
-            fs::remove_file(&active_binary_path)?;
+            let _ = fs::remove_file(&active_binary_path);
         }
-        
+
         println!(
             "  - Activating new version by symlinking {:?} to {:?}",
             target_file_path, active_binary_path
         );
-        symlink(&target_file_path, &active_binary_path)?;
+        match symlink(&target_file_path, &active_binary_path) {
+            Ok(_) => println!("  - Done"),
+            Err(e) => eprintln!("Failed to create symlink: {}", e),
+        }
 
         versions::set_current_version(module_dir, &versions::parse_version(&module.version)?)?;
         println!(
@@ -149,16 +152,22 @@ pub fn install(
 
     // Cleanup
     fs::remove_dir_all(&unpack_dir)?;
-    
+
     if at_least_one_module_installed {
         let release = Release {
             current_version: versions::parse_version(&manifest.version_set)?,
-            installed: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string(),
+            installed: SystemTime::now()
+                .duration_since(UNIX_EPOCH)?
+                .as_secs()
+                .to_string(),
         };
         let toml_string = toml::to_string(&release)?;
         let mut file = File::create(&current_version_toml_path)?;
         file.write_all(toml_string.as_bytes())?;
-        println!("Installation complete. Updated current_version.toml to version {}.", manifest.version_set);
+        println!(
+            "Installation complete. Updated current_version.toml to version {}.",
+            manifest.version_set
+        );
     } else {
         println!("Installation complete. No new modules were installed.");
     }
