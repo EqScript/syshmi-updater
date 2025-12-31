@@ -10,8 +10,7 @@ use tar::Archive;
 use toml;
 
 use crate::manifest::Manifest;
-use crate::release::Release;
-use crate::versions;
+use crate::versions::{self, Release};
 
 fn verify_checksum(file_path: &Path, expected_checksum: &str) -> Result<(), String> {
     println!("Verifying checksum for {:?}", file_path);
@@ -41,7 +40,7 @@ fn verify_checksum(file_path: &Path, expected_checksum: &str) -> Result<(), Stri
         Ok(())
     } else {
         Err(format!(
-            "Checksum mismatch for {:?}!\n  Expected: {}\n  Got:      {}",
+            "Checksum mismatch for {:?}\n  Expected: {}\n  Got:      {}",
             file_path.file_name().unwrap_or_default(),
             expected_checksum,
             hash_hex
@@ -77,15 +76,6 @@ pub fn install(
         .ok_or("Invalid staging dir")?;
     let current_version_toml_path = staging_parent.join("current_version.toml");
 
-    if current_version_toml_path.exists() {
-        let content = fs::read_to_string(&current_version_toml_path)?;
-        let release: Release = toml::from_str(&content)?;
-        if release.current_version == manifest.version_set {
-            println!("System is already up to date with version {}.", manifest.version_set);
-            return Ok(());
-        }
-    }
-
     let unpack_dir = Path::new(staging_dir).join("unpacked");
     if unpack_dir.exists() {
         fs::remove_dir_all(&unpack_dir)?;
@@ -98,7 +88,7 @@ pub fn install(
     let mut archive = Archive::new(tar);
     archive.unpack(&unpack_dir)?;
 
-    let archive_base_dir = staging_parent.join("archive");
+    let _archive_base_dir = staging_parent.join("archive");
 
     let mut at_least_one_module_installed = false;
 
@@ -106,53 +96,55 @@ pub fn install(
         println!("Processing module: {}", module.name);
 
         let module_dir = Path::new(&module.target_dir);
-        if let Some(new_version) = versions::should_install(&module.version, module_dir)? {
-            at_least_one_module_installed = true;
+        // The main.rs already decided if an update is needed at a global level (for the manifest.version_set)
+        // so installer.rs should not re-evaluate whether individual modules should be installed.
+        // It should simply proceed with installing all modules described in the manifest.
 
-            let module_binary_name = Path::new(module.start_command.as_deref().unwrap_or_default())
-                .file_name()
-                .and_then(|s| s.to_str())
-                .ok_or(format!("Module {} has invalid start_command", module.name))?;
+        at_least_one_module_installed = true;
 
-            let found_file_path = find_file_in_dir(&unpack_dir, module_binary_name).ok_or(format!(
-                "Could not find module binary '{}' in unpacked archive.",
-                module_binary_name
-            ))?;
+        let module_binary_name = Path::new(module.start_command.as_deref().unwrap_or_default())
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or(format!("Module {} has invalid start_command", module.name))?;
 
-            verify_checksum(&found_file_path, &module.checksum)?;
+        let found_file_path = find_file_in_dir(&unpack_dir, module_binary_name).ok_or(format!(
+            "Could not find module binary '{}' in unpacked archive.",
+            module_binary_name
+        ))?;
 
-            let release_dir = module_dir.join("releases").join(format!("v{}", &module.version));
+        verify_checksum(&found_file_path, &module.checksum)?;
 
-            if release_dir.exists() {
-                fs::remove_dir_all(&release_dir)?;
-            }
-            fs::create_dir_all(&release_dir)?;
+        let release_dir = module_dir.join("releases").join(format!("v{}", &module.version));
 
-            let target_file_path = release_dir.join(module_binary_name);
-            
-            println!(
-                "  - Installing {:?} to {:?}",
-                found_file_path, target_file_path
-            );
-            fs::rename(found_file_path, &target_file_path)?;
-
-            let active_binary_path = module_dir.join(module_binary_name);
-            if active_binary_path.exists() {
-                fs::remove_file(&active_binary_path)?;
-            }
-            
-            println!(
-                "  - Activating new version by symlinking {:?} to {:?}",
-                target_file_path, active_binary_path
-            );
-            symlink(&target_file_path, &active_binary_path)?;
-
-            versions::set_current_version(module_dir, &new_version)?;
-            println!(
-                "  - Successfully installed module {} version {}",
-                module.name, new_version
-            );
+        if release_dir.exists() {
+            fs::remove_dir_all(&release_dir)?;
         }
+        fs::create_dir_all(&release_dir)?;
+
+        let target_file_path = release_dir.join(module_binary_name);
+        
+        println!(
+            "  - Installing {:?} to {:?}",
+            found_file_path, target_file_path
+        );
+        fs::rename(found_file_path, &target_file_path)?;
+
+        let active_binary_path = module_dir.join(module_binary_name);
+        if active_binary_path.exists() {
+            fs::remove_file(&active_binary_path)?;
+        }
+        
+        println!(
+            "  - Activating new version by symlinking {:?} to {:?}",
+            target_file_path, active_binary_path
+        );
+        symlink(&target_file_path, &active_binary_path)?;
+
+        versions::set_current_version(module_dir, &versions::parse_version(&module.version)?)?;
+        println!(
+            "  - Successfully installed module {} version {}",
+            module.name, module.version
+        );
     }
 
     // Cleanup
@@ -160,7 +152,7 @@ pub fn install(
     
     if at_least_one_module_installed {
         let release = Release {
-            current_version: manifest.version_set.clone(),
+            current_version: versions::parse_version(&manifest.version_set)?,
             installed: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string(),
         };
         let toml_string = toml::to_string(&release)?;

@@ -1,15 +1,13 @@
 mod config;
+mod installer;
 mod manifest;
 mod network;
-mod installer;
 mod versions;
-mod release;
 
 use config::Config;
-use network::{fetch_manifest, download_firmware};
 use installer::install;
-
-
+use network::{download_firmware, fetch_manifest};
+use versions::should_install;
 
 #[tokio::main]
 async fn main() {
@@ -30,6 +28,15 @@ async fn main() {
 
     println!("Successfully fetched manifest:\n{:#?}", manifest);
 
+    // Compare versions and decide whether to install
+    if !should_install(&manifest.version_set).unwrap_or_else(|e| {
+        eprintln!("Failed to check version: {}", e);
+        std::process::exit(1);
+    }) {
+        println!("Current version is up to date, nothingg to do, now exit...");
+        return;
+    }
+
     match download_firmware(&manifest, &cfg.staging_dir).await {
         Ok(path) => {
             println!("Firmware downloaded successfully to {}", path);
@@ -37,7 +44,7 @@ async fn main() {
                 eprintln!("Failed to install module(s): {}", e);
                 std::process::exit(1);
             }
-        },
+        }
         Err(e) => {
             eprintln!("Failed to download firmware: {}", e);
             std::process::exit(1);
