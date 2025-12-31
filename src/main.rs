@@ -2,6 +2,8 @@ mod config;
 mod manifest;
 mod network;
 mod installer;
+mod versions;
+mod release;
 
 use config::Config;
 use network::{fetch_manifest, download_firmware};

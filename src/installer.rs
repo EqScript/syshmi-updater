@@ -1,20 +1,29 @@
 use std::fs::{self, File};
-use std::io::Read;
+use std::os::unix::fs::symlink;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tar::Archive;
+
 use flate2::read::GzDecoder;
+use sha2::{Digest, Sha256};
+use tar::Archive;
+use toml;
+
 use crate::manifest::Manifest;
-use sha2::{Sha256, Digest};
+use crate::release::Release;
+use crate::versions;
 
 fn verify_checksum(file_path: &Path, expected_checksum: &str) -> Result<(), String> {
     println!("Verifying checksum for {:?}", file_path);
-    let mut file = File::open(file_path).map_err(|e| format!("Failed to open file {:?}: {}", file_path, e))?;
+    let mut file =
+        File::open(file_path).map_err(|e| format!("Failed to open file {:?}: {}", file_path, e))?;
     let mut hasher = Sha256::new();
-    
+
     let mut buffer = [0; 8192];
     loop {
-        let n = file.read(&mut buffer).map_err(|e| format!("Failed to read file chunk: {}", e))?;
+        let n = file
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed to read file chunk: {}", e))?;
         if n == 0 {
             break;
         }
@@ -25,10 +34,18 @@ fn verify_checksum(file_path: &Path, expected_checksum: &str) -> Result<(), Stri
     let hash_hex = format!("{:x}", hash);
 
     if hash_hex.eq_ignore_ascii_case(expected_checksum) {
-        println!("Checksum for {:?} is valid.", file_path.file_name().unwrap_or_default());
+        println!(
+            "Checksum for {:?} is valid.",
+            file_path.file_name().unwrap_or_default()
+        );
         Ok(())
     } else {
-        Err(format!("Checksum mismatch for {:?}!\n  Expected: {}\n  Got:      {}", file_path.file_name().unwrap_or_default(), expected_checksum, hash_hex))
+        Err(format!(
+            "Checksum mismatch for {:?}!\n  Expected: {}\n  Got:      {}",
+            file_path.file_name().unwrap_or_default(),
+            expected_checksum,
+            hash_hex
+        ))
     }
 }
 
@@ -50,7 +67,25 @@ fn find_file_in_dir(dir: &Path, file_name: &str) -> Option<PathBuf> {
     None
 }
 
-pub fn install(archive_path: &str, staging_dir: &str, manifest: &Manifest) -> Result<(), Box<dyn std::error::Error>> {
+pub fn install(
+    archive_path: &str,
+    staging_dir: &str,
+    manifest: &Manifest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let staging_parent = Path::new(staging_dir)
+        .parent()
+        .ok_or("Invalid staging dir")?;
+    let current_version_toml_path = staging_parent.join("current_version.toml");
+
+    if current_version_toml_path.exists() {
+        let content = fs::read_to_string(&current_version_toml_path)?;
+        let release: Release = toml::from_str(&content)?;
+        if release.current_version == manifest.version_set {
+            println!("System is already up to date with version {}.", manifest.version_set);
+            return Ok(());
+        }
+    }
+
     let unpack_dir = Path::new(staging_dir).join("unpacked");
     if unpack_dir.exists() {
         fs::remove_dir_all(&unpack_dir)?;
@@ -63,44 +98,78 @@ pub fn install(archive_path: &str, staging_dir: &str, manifest: &Manifest) -> Re
     let mut archive = Archive::new(tar);
     archive.unpack(&unpack_dir)?;
 
-    // Create a single timestamped archive directory for this update operation
-    let staging_parent = Path::new(staging_dir).parent().ok_or("Invalid staging dir")?;
     let archive_base_dir = staging_parent.join("archive");
+
+    let mut at_least_one_module_installed = false;
 
     for module in &manifest.modules {
         println!("Processing module: {}", module.name);
 
-        let module_binary_name = Path::new(module.start_command.as_deref().unwrap_or_default())
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or(format!("Module {} has invalid start_command", module.name))?;
+        let module_dir = Path::new(&module.target_dir);
+        if let Some(new_version) = versions::should_install(&module.version, module_dir)? {
+            at_least_one_module_installed = true;
 
-        let found_file_path = find_file_in_dir(&unpack_dir, module_binary_name)
-            .ok_or(format!("Could not find module binary '{}' in unpacked archive.", module_binary_name))?;
+            let module_binary_name = Path::new(module.start_command.as_deref().unwrap_or_default())
+                .file_name()
+                .and_then(|s| s.to_str())
+                .ok_or(format!("Module {} has invalid start_command", module.name))?;
 
-        verify_checksum(&found_file_path, &module.checksum)?;
+            let found_file_path = find_file_in_dir(&unpack_dir, module_binary_name).ok_or(format!(
+                "Could not find module binary '{}' in unpacked archive.",
+                module_binary_name
+            ))?;
 
-        let target_file_path = Path::new(&module.target_dir).join(module_binary_name);
-        
-        // Backup existing file if it exists
-        if target_file_path.exists() {
-            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-            let archive_op_dir = archive_base_dir.join(format!("{}_{}", module.name, timestamp));
-            fs::create_dir_all(&archive_op_dir)?;
-            let backup_path = archive_op_dir.join(module_binary_name);
-            println!("  - Backing up {:?} to {:?}", target_file_path, backup_path);
-            fs::rename(&target_file_path, backup_path)?;
+            verify_checksum(&found_file_path, &module.checksum)?;
+
+            let release_dir = module_dir.join("releases").join(format!("v{}", &module.version));
+
+            if release_dir.exists() {
+                fs::remove_dir_all(&release_dir)?;
+            }
+            fs::create_dir_all(&release_dir)?;
+
+            let target_file_path = release_dir.join(module_binary_name);
+            
+            println!(
+                "  - Installing {:?} to {:?}",
+                found_file_path, target_file_path
+            );
+            fs::rename(found_file_path, &target_file_path)?;
+
+            let active_binary_path = module_dir.join(module_binary_name);
+            if active_binary_path.exists() {
+                fs::remove_file(&active_binary_path)?;
+            }
+            
+            println!(
+                "  - Activating new version by symlinking {:?} to {:?}",
+                target_file_path, active_binary_path
+            );
+            symlink(&target_file_path, &active_binary_path)?;
+
+            versions::set_current_version(module_dir, &new_version)?;
+            println!(
+                "  - Successfully installed module {} version {}",
+                module.name, new_version
+            );
         }
-        
-        // Place new module file
-        println!("  - Installing {:?} to {:?}", found_file_path, target_file_path);
-        fs::create_dir_all(target_file_path.parent().unwrap())?;
-        fs::rename(found_file_path, &target_file_path)?;
     }
 
     // Cleanup
     fs::remove_dir_all(&unpack_dir)?;
-    println!("Installation complete. Cleaned up temporary unpack directory.");
     
+    if at_least_one_module_installed {
+        let release = Release {
+            current_version: manifest.version_set.clone(),
+            installed: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().to_string(),
+        };
+        let toml_string = toml::to_string(&release)?;
+        let mut file = File::create(&current_version_toml_path)?;
+        file.write_all(toml_string.as_bytes())?;
+        println!("Installation complete. Updated current_version.toml to version {}.", manifest.version_set);
+    } else {
+        println!("Installation complete. No new modules were installed.");
+    }
+
     Ok(())
 }
