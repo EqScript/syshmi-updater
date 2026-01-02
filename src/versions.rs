@@ -1,3 +1,4 @@
+use crate::config::Config;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -24,15 +25,28 @@ pub fn parse_version(version_str: &str) -> Result<Version, semver::Error> {
     Version::parse(&replaced_version_str)
 }
 
-pub fn get_current_version_from_toml() -> Result<Option<Version>, Box<dyn std::error::Error>> {
-    let path = Path::new("./current_version.toml");
+pub fn get_current_version_from_toml(
+    config: &Config,
+) -> Result<Option<Version>, Box<dyn std::error::Error>> {
+    let base_dir = Path::new(&config.staging_dir)
+        .parent()
+        .ok_or("Invalid staging dir")?;
+    let path = base_dir.join("current_version.toml");
     if !path.exists() {
         return Ok(None);
     }
 
     let content = fs::read_to_string(path)?;
-    let release: Release = toml::from_str(&content)?;
-    Ok(Some(release.current_version))
+    let table: toml::Value = toml::from_str(&content)?;
+
+    if let Some(version_str) = table.get("current_version").and_then(|v| v.as_str()) {
+        match parse_version(version_str) {
+            Ok(version) => Ok(Some(version)),
+            Err(_) => Ok(None), // Or handle the error more gracefully
+        }
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn set_current_version(module_dir: &Path, version: &Version) -> Result<(), std::io::Error> {
@@ -42,14 +56,23 @@ pub fn set_current_version(module_dir: &Path, version: &Version) -> Result<(), s
     Ok(())
 }
 
-pub fn should_install(new_version_str: &str) -> Result<bool, Box<dyn std::error::Error>> {
+pub fn should_install(
+    new_version_str: &str,
+    config: &Config,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let new_version =
         parse_version(new_version_str).map_err(|e| format!("Invalid new version string: {}", e))?;
 
-    if let Some(current_version) = get_current_version_from_toml()? {
+    println!("Checking if should install new version: {}", new_version);
+
+    if let Some(current_version) = get_current_version_from_toml(config)? {
+        println!("Found current version: {}", current_version);
         if new_version <= current_version {
+            println!("New version is not greater than current version. Skipping installation.");
             return Ok(false);
         }
+    } else {
+        println!("No current version found. Proceeding with installation.");
     }
     Ok(true)
 }
@@ -57,8 +80,25 @@ pub fn should_install(new_version_str: &str) -> Result<bool, Box<dyn std::error:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write;
     use tempfile::tempdir;
+
+    fn setup_test_env() -> (tempfile::TempDir, Config) {
+        let dir = tempdir().unwrap();
+        let staging_dir = dir.path().join("staging");
+        fs::create_dir(&staging_dir).unwrap();
+        let config = Config {
+            endpoint: "dummy".to_string(),
+            auth_file: "dummy".to_string(),
+            staging_dir: staging_dir.to_str().unwrap().to_string(),
+            rollback_keep: 2,
+            update_interval: "daily".to_string(),
+            self_update: false,
+            log_file: "dummy".to_string(),
+        };
+        (dir, config)
+    }
 
     #[test]
     fn test_parse_version() {
@@ -79,52 +119,45 @@ mod tests {
 
     #[test]
     fn test_get_current_version_from_toml() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempdir()?;
+        let (dir, config) = setup_test_env();
         let file_path = dir.path().join("current_version.toml");
 
         let mut file = File::create(&file_path)?;
         file.write_all(b"current_version = \"1.2.3\"\ninstalled = \"sometime\"")?;
 
-        // Change current working directory to the temp directory
-        let original_dir = std::env::current_dir()?;
-        std::env::set_current_dir(&dir)?;
-
-        let current_version = get_current_version_from_toml()?;
+        let current_version = get_current_version_from_toml(&config)?;
         assert!(current_version.is_some());
         assert_eq!(current_version.unwrap().to_string(), "1.2.3");
 
-        // Restore original working directory
-        std::env::set_current_dir(&original_dir)?;
         Ok(())
     }
 
     #[test]
     fn test_should_install() -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempdir()?;
+        let (dir, config) = setup_test_env();
         let file_path = dir.path().join("current_version.toml");
 
         // Test case 1: New version is higher
         let mut file = File::create(&file_path)?;
         file.write_all(b"current_version = \"1.0.0\"\ninstalled = \"sometime\"")?;
-        let original_dir = std::env::current_dir()?;
-        std::env::set_current_dir(&dir)?;
-        assert_eq!(should_install("1.1.0")?, true);
-        std::env::set_current_dir(&original_dir)?;
+        assert_eq!(should_install("1.1.0", &config)?, true);
         fs::remove_file(&file_path)?;
 
         // Test case 2: New version is lower or equal
         let mut file = File::create(&file_path)?;
         file.write_all(b"current_version = \"1.2.0\"\ninstalled = \"sometime\"")?;
-        std::env::set_current_dir(&dir)?;
-        assert_eq!(should_install("1.1.0")?, false);
-        assert_eq!(should_install("1.2.0")?, false);
-        std::env::set_current_dir(&original_dir)?;
+        assert_eq!(should_install("1.1.0", &config)?, false);
+        assert_eq!(should_install("1.2.0", &config)?, false);
         fs::remove_file(&file_path)?;
 
         // Test case 3: No current_version.toml
-        std::env::set_current_dir(&dir)?;
-        assert_eq!(should_install("1.0.0")?, true);
-        std::env::set_current_dir(&original_dir)?;
+        assert_eq!(should_install("1.0.0", &config)?, true);
+
+        // Test case 4: version with 'b'
+        let mut file = File::create(&file_path)?;
+        file.write_all(b"current_version = \"0.0.1b\"\ninstalled = \"sometime\"")?;
+        assert_eq!(should_install("0.0.1-beta", &config)?, false);
+        fs::remove_file(&file_path)?;
 
         Ok(())
     }

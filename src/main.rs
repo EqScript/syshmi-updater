@@ -26,14 +26,14 @@ async fn main() {
         std::process::exit(1);
     });
 
-    println!("Successfully fetched manifest:\n{:#?}", manifest);
+    println!("Successfully fetched manifest:\n{}", manifest);
 
     // Compare versions and decide whether to install
-    if !should_install(&manifest.version_set).unwrap_or_else(|e| {
+    if !should_install(&manifest.version_set, &cfg).unwrap_or_else(|e| {
         eprintln!("Failed to check version: {}", e);
         std::process::exit(1);
     }) {
-        println!("Current version is up to date, nothingg to do, now exit...");
+        println!("Current version is up to date, nothing to do, now exit...");
         return;
     }
 
