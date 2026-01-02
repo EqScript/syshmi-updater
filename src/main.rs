@@ -9,8 +9,10 @@ use installer::install;
 use network::{download_firmware, fetch_manifest};
 use versions::should_install;
 
-use log::{info, error, LevelFilter};
-use simplelog::{WriteLogger, CombinedLogger, Config as SimplelogConfig};
+use log::{LevelFilter, error, info};
+use simplelog::{
+    ColorChoice, CombinedLogger, Config as SimplelogConfig, TermLogger, TerminalMode, WriteLogger,
+};
 use std::fs::{File, create_dir_all};
 use std::path::Path;
 
@@ -31,13 +33,23 @@ async fn main() {
     if let Some(log_dir) = Path::new(log_file_path).parent() {
         if !log_dir.exists() {
             if let Err(e) = create_dir_all(log_dir) {
-                eprintln!("Failed to create log directory {}: {}", log_dir.display(), e);
+                eprintln!(
+                    "Failed to create log directory {}: {}",
+                    log_dir.display(),
+                    e
+                );
                 std::process::exit(1);
             }
         }
     }
-    
+
     if let Err(e) = CombinedLogger::init(vec![
+        TermLogger::new(
+            LevelFilter::Info,
+            SimplelogConfig::default(),
+            TerminalMode::Mixed,
+            ColorChoice::Auto,
+        ),
         WriteLogger::new(
             LevelFilter::Info, // Log Info level and above to file
             SimplelogConfig::default(),
@@ -45,7 +57,7 @@ async fn main() {
                 eprintln!("Failed to create log file {}: {}", log_file_path, file_err);
                 std::process::exit(1);
             }),
-        )
+        ),
     ]) {
         eprintln!("Failed to initialize logger: {}", e);
         // If logger fails to initialize, we can't log, so just exit
