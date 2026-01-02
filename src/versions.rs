@@ -1,4 +1,5 @@
 use crate::config::Config;
+use log::info;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -63,16 +64,16 @@ pub fn should_install(
     let new_version =
         parse_version(new_version_str).map_err(|e| format!("Invalid new version string: {}", e))?;
 
-    println!("Checking if should install new version: {}", new_version);
+    info!("Checking if should install new version: {}", new_version);
 
     if let Some(current_version) = get_current_version_from_toml(config)? {
-        println!("Found current version: {}", current_version);
+        info!("Found current version: {}", current_version);
         if new_version <= current_version {
-            println!("New version is not greater than current version. Skipping installation.");
+            info!("New version is not greater than current version. Skipping installation.");
             return Ok(false);
         }
     } else {
-        println!("No current version found. Proceeding with installation.");
+        info!("No current version found. Proceeding with installation.");
     }
     Ok(true)
 }
